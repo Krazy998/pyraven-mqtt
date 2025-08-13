@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """
-Transfers data from a Rainforest Automation RAVEn USB stick to an MQTT topic.
+Transfers data from a Rainforest Automation RAVEn USB stick to MQTT.
 
-- Payload and topic are unchanged vs original (telemetry is json.dumps(long_poll_result()))
-- Adds robust reconnects, MQTT loop, LWT/birth, and graceful shutdown.
+Topic layout (given --topic <prefix>):
+  <prefix>/state              - birth/LWT messages ("online"/"offline"), retained
+  <prefix>/sensor/telemetry   - telemetry payloads with an added "ts" field
+  <prefix>/status             - reserved for heartbeat/status (not used yet)
+
+Reliability:
+- MQTT network loop thread
+- Exponential backoff + jitter on connect/reconnect
+- LWT + birth messages
+- Graceful shutdown on SIGINT/SIGTERM
+- Optional TLS
 """
 
 from __future__ import annotations
@@ -16,7 +25,7 @@ import random
 import signal
 import sys
 import time
-from typing import Any
+from typing import Any, Dict
 
 import paho.mqtt.client as mqtt  # pip install paho-mqtt
 import raven  # pip install pyraven
@@ -48,15 +57,15 @@ def parse_args() -> argparse.Namespace:
         "-T",
         "--topic",
         default="raven",
-        help="MQTT topic to publish to [%(default)s]",
+        help="MQTT topic prefix (e.g. 'raven') [%(default)s]",
     )
     parser.add_argument(
-        "--qos", type=int, choices=(0, 1, 2), default=0, help="MQTT QoS [%(default)s]"
+        "--qos", type=int, choices=(0, 1, 2), default=1, help="MQTT QoS [%(default)s]"
     )
     parser.add_argument(
         "--retain",
         action="store_true",
-        help="Set retain flag on telemetry messages",
+        help="Set retain flag on telemetry messages (default: off)",
     )
     parser.add_argument(
         "--poll-interval",
@@ -85,8 +94,18 @@ def setup_logging(level: str) -> None:
     logging.getLogger("paho").setLevel(logging.WARNING)
 
 
-def make_client(args: argparse.Namespace) -> mqtt.Client:
-    """Create and configure the MQTT client, including LWT."""
+def build_topics(prefix: str) -> Dict[str, str]:
+    """Build the topic map from a prefix."""
+    base = prefix.rstrip("/")
+    return {
+        "state": f"{base}/state",
+        "telemetry": f"{base}/sensor/telemetry",
+        "status": f"{base}/status",
+    }
+
+
+def make_client(args: argparse.Namespace, topics: Dict[str, str]) -> mqtt.Client:
+    """Create and configure the MQTT client, including LWT on <prefix>/state."""
     client = mqtt.Client(client_id=args.client_id, clean_session=True)
     if args.username:
         client.username_pw_set(args.username, args.password)
@@ -98,8 +117,8 @@ def make_client(args: argparse.Namespace) -> mqtt.Client:
         if args.insecure:
             client.tls_insecure_set(True)
 
-    # Last Will: publish "offline" if we disappear
-    client.will_set(args.topic, payload="offline", qos=1, retain=True)
+    # Last Will: publish "offline" on state topic if we disappear
+    client.will_set(topics["state"], payload="offline", qos=1, retain=True)
     return client
 
 
@@ -113,7 +132,7 @@ def connect_with_backoff(
         try:
             client.connect(host, port, keepalive=DEFAULT_KEEPALIVE)
             return
-        except OSError as err:  # network/socket errors
+        except OSError as err:
             log.warning("MQTT connect error=%r backoff=%.1fs", err, backoff)
             time.sleep(backoff + random.random())
             backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
@@ -126,8 +145,9 @@ def publish_with_reconnect(
     qos: int,
     retain: bool,
     stopping_flag: list[bool],
+    birth_topic: str | None = None,
 ) -> None:
-    """Publish once; on failure, attempt to reconnect with backoff and retry birth."""
+    """Publish once; on failure, attempt to reconnect with backoff and re-send birth."""
     log = logging.getLogger("pyrmqtt")
     result = client.publish(topic, payload, qos=qos, retain=retain)
     if result.rc == mqtt.MQTT_ERR_SUCCESS:
@@ -139,9 +159,8 @@ def publish_with_reconnect(
         try:
             client.reconnect()
             log.info("MQTT reconnected")
-            # Birth message: let subscribers know we're back
-            client.publish(topic, "online", qos=1, retain=True)
-            # try publish again
+            if birth_topic:
+                client.publish(birth_topic, "online", qos=1, retain=True)
             retry = client.publish(topic, payload, qos=qos, retain=retain)
             if retry.rc == mqtt.MQTT_ERR_SUCCESS:
                 return
@@ -151,22 +170,27 @@ def publish_with_reconnect(
             backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
 
 
+def _now_ts() -> float:
+    """Epoch seconds as float."""
+    return time.time()
+
+
 def main() -> None:
     """Entry point: wire up device, MQTT, and transfer loop."""
     args = parse_args()
     setup_logging(args.log_level)
     log = logging.getLogger("pyrmqtt")
+    topics = build_topics(args.topic)
 
     # Connect to RAVEn
     try:
         raven_usb = raven.raven.Raven(args.device)
         log.info("Connected to RAVEn device=%s", args.device)
     except Exception:  # pylint: disable=broad-except
-        # The library may raise non-standard exceptions; log full trace and exit.
         log.exception("Failed to connect to RAVEn device=%s", args.device)
         sys.exit(2)
 
-    client = make_client(args)
+    client = make_client(args, topics)
 
     # Stop flag in a list so closures can mutate it
     stopping = [False]
@@ -181,21 +205,21 @@ def main() -> None:
     def on_connect(
         client_obj: mqtt.Client,
         _userdata: Any,
-        _flags: dict[str, Any],
-        return_code: int,  # return code from the broker
+        _flags: Dict[str, Any],
+        return_code: int,
         _properties: Any = None,
     ) -> None:
         """MQTT on_connect callback: publish birth if connection OK."""
         if return_code == 0:
             log.info("MQTT connected host=%s port=%s", args.host, args.port)
-            client_obj.publish(args.topic, "online", qos=1, retain=True)
+            client_obj.publish(topics["state"], "online", qos=1, retain=True)
         else:
             log.error("MQTT connect failed rc=%s", return_code)
 
     def on_disconnect(
         _client_obj: mqtt.Client,
         _userdata: Any,
-        return_code: int,  # disconnect return code
+        return_code: int,
         _properties: Any = None,
     ) -> None:
         """MQTT on_disconnect callback: note unexpected disconnects."""
@@ -211,27 +235,37 @@ def main() -> None:
     # Transfer loop
     while not stopping[0]:
         try:
-            payload = json.dumps(raven_usb.long_poll_result())
+            raw = raven_usb.long_poll_result()
         except Exception:  # pylint: disable=broad-except
             # pyraven may raise broad exceptions on serial hiccups; log and continue.
             log.exception("Error polling RAVEn")
             time.sleep(args.poll_interval)
             continue
 
+        # Add a timestamp while keeping the original keys intact.
+        # If raw isn't a dict, we wrap it under "data".
+        if isinstance(raw, dict):
+            payload_obj: Dict[str, Any] = {"ts": _now_ts(), **raw}
+        else:
+            payload_obj = {"ts": _now_ts(), "data": raw}
+
+        payload = json.dumps(payload_obj, separators=(",", ":"))
+
         publish_with_reconnect(
             client,
-            topic=args.topic,
+            topic=topics["telemetry"],
             payload=payload,
             qos=args.qos,
             retain=args.retain,
             stopping_flag=stopping,
+            birth_topic=topics["state"],
         )
 
         time.sleep(args.poll_interval)
 
     # Shutdown
     try:
-        client.publish(args.topic, "offline", qos=1, retain=True)
+        client.publish(topics["state"], "offline", qos=1, retain=True)
     except Exception:  # pylint: disable=broad-except
         pass
     client.loop_stop()
