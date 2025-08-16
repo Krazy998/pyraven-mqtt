@@ -2,14 +2,35 @@
 version: "3.8"
 services:
   pyrmqtt:
-    build: .
-    # ⚠️ Change host, username and password details to match your environment
-    command: --host 10.0.0.1 --username username --password password --device /serial
-    devices:
-      # ⚠️ Change /dev/ttyUSB0 to where your raven dongle is mounted
-      - "/dev/ttyUSB0:/serial"
-      - "/serial"
+    build: /opt/pyraven-mqtt
     image: pyrmqtt
     container_name: pyrmqtt
-    restart: always
     tty: true
+    restart: always
+    devices:
+      # your existing RAVEn USB mapping
+      - /dev/serial/by-id/usb-Rainforest_RFA-Z106-RA-PC_RAVEn_v2.3.21-if00-port0:/serial
+    environment:
+      RAVEN_DEVICE: "/serial"
+      # --- existing MQTT config used by pyrmqtt.py ---
+      MQTT_HOST: 192.168.0.0
+      MQTT_PORT: 1883
+      MQTT_USERNAME: "yourusername"
+      MQTT_PASSWORD: "yourpassword"
+
+      # --- PVOutput uploader (optional) ---
+      PVOUTPUT_ENABLED: "true"         # set "false" to disable
+      PVOUTPUT_API_KEY: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      PVOUTPUT_SYSTEM_ID: "12345"
+      PVOUTPUT_NET: "0"                # 0 = gross (v4 only), 1 = net (v2 export + v4 import)
+      PVOUTPUT_INTERVAL_SECONDS: "300" # 300=5min (PVOutput standard interval)
+
+      # --- Telemetry source ---
+      PVOUTPUT_MQTT_TOPIC: "raven/sensor/telemetry"
+
+      # --- Fronius voltage source (optional) ---
+      FRONIUS_HOST: "192.168.0.0"
+      FRONIUS_DEVICE_ID: "1"
+      # FRONIUS_USERNAME: ""
+      # FRONIUS_PASSWORD: ""
+      TZ: "Australia/Melbourne"        # matches your locale; PVOutput uses system tz
