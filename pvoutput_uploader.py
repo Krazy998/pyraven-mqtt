@@ -169,7 +169,7 @@ def post_pvoutput(now_local: datetime, demand_w: Optional[float], voltage_v: Opt
     resp = requests.post(PVOUTPUT_URL, data=payload, headers=headers, timeout=8)
     if resp.status_code != 200:
         raise RuntimeError(f"PVOutput HTTP {resp.status_code} {resp.text}")
-    LOG.info("PVOutput: %s | remaining=%s", resp.text.strip(), resp.headers.get("X-Rate-Limit-Remaining"))
+    LOG.debug("PVOutput: %s | remaining=%s", resp.text.strip(), resp.headers.get("X-Rate-Limit-Remaining"))
 
 
 def align_and_sleep(interval_s: int) -> None:
