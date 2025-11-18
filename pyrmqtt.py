@@ -35,6 +35,32 @@ DEFAULT_BACKOFF_MAX = 60
 DEFAULT_KEEPALIVE = 30
 
 
+class ResilientRaven(raven.raven.Raven):
+    """RAVEn subclass that drops malformed XML fragments instead of dying."""
+
+    def __init__(self, port: str, log: logging.Logger) -> None:
+        self._log = log
+        super().__init__(port=port)
+        self.fragment = getattr(self, "fragment", "")
+        self.in_fragment = getattr(self, "in_fragment", False)
+
+    def handle_fragment(self) -> None:  # type: ignore[override]
+        try:
+            super().handle_fragment()
+        except ET.ParseError as err:
+            fragment = getattr(self, "fragment", "") or ""
+            frag_len = len(fragment)
+            self._log.warning(
+                "Malformed RAVEn fragment dropped len=%s err=%s", frag_len, err
+            )
+            self.fragment = ""
+            self.in_fragment = False
+        except Exception:  # pylint: disable=broad-except
+            self._log.exception("Unexpected RAVEn fragment handling failure")
+            self.fragment = ""
+            self.in_fragment = False
+
+
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(prog="pyrmqtt")
