@@ -16,11 +16,10 @@ from datetime import datetime
 from typing import Optional
 
 from zoneinfo import ZoneInfo
+import paho.mqtt.client as mqtt
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
-
-import paho.mqtt.client as mqtt
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
