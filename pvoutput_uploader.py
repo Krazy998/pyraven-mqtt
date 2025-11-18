@@ -6,6 +6,7 @@ Fronius inverter, and posts status to PVOutput at a fixed interval.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -15,8 +16,10 @@ from datetime import datetime
 from typing import Optional
 
 from zoneinfo import ZoneInfo
-import requests
-from requests import RequestException
+from urllib import error as urlerror
+from urllib import parse as urlparse
+from urllib import request as urlrequest
+
 import paho.mqtt.client as mqtt
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -120,12 +123,17 @@ def get_voltage() -> Optional[float]:
     url = f"http://{FRONIUS_HOST}/solar_api/v1/GetInverterRealtimeData.cgi"
     params = {"Scope": "Device", "DeviceId": FRONIUS_DEVICE_ID, "DataCollection": "CommonInverterData"}
     try:
-        auth = (FRONIUS_USER, FRONIUS_PASS) if FRONIUS_USER and FRONIUS_PASS else None
-        resp = requests.get(url, params=params, auth=auth, timeout=FRONIUS_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
+        query = urlparse.urlencode(params)
+        full_url = f"{url}?{query}"
+        req = urlrequest.Request(full_url)
+        if FRONIUS_USER and FRONIUS_PASS:
+            credentials = f"{FRONIUS_USER}:{FRONIUS_PASS}".encode("utf-8")
+            token = base64.b64encode(credentials).decode("ascii")
+            req.add_header("Authorization", f"Basic {token}")
+        with urlrequest.urlopen(req, timeout=FRONIUS_TIMEOUT) as resp:
+            data = json.load(resp)
         return float(data["Body"]["Data"]["UAC"]["Value"])
-    except (RequestException, ValueError, KeyError, TypeError):
+    except (urlerror.URLError, ValueError, KeyError, TypeError):
         LOG.debug("Voltage fetch failed", exc_info=False)
         return None
 
@@ -166,10 +174,18 @@ def post_pvoutput(now_local: datetime, demand_w: Optional[float], voltage_v: Opt
         "X-Rate-Limit": "1",
     }
 
-    resp = requests.post(PVOUTPUT_URL, data=payload, headers=headers, timeout=8)
-    if resp.status_code != 200:
-        raise RuntimeError(f"PVOutput HTTP {resp.status_code} {resp.text}")
-    LOG.debug("PVOutput: %s | remaining=%s", resp.text.strip(), resp.headers.get("X-Rate-Limit-Remaining"))
+    data = urlparse.urlencode(payload).encode("ascii")
+    req = urlrequest.Request(PVOUTPUT_URL, data=data, headers=headers)
+    try:
+        with urlrequest.urlopen(req, timeout=8) as resp:
+            body = resp.read().decode("utf-8", errors="replace").strip()
+            remaining = resp.headers.get("X-Rate-Limit-Remaining")
+        LOG.debug("PVOutput: %s | remaining=%s", body, remaining)
+    except urlerror.HTTPError as err:
+        body = err.read().decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"PVOutput HTTP {err.code} {body}") from err
+    except urlerror.URLError as err:
+        raise RuntimeError(f"PVOutput request failed: {err}") from err
 
 
 def align_and_sleep(interval_s: int) -> None:
@@ -203,7 +219,7 @@ def main() -> None:
         voltage_v = get_voltage()
         try:
             post_pvoutput(now_local, demand_w, voltage_v)
-        except (RequestException, RuntimeError) as err:
+        except (RuntimeError, urlerror.URLError) as err:
             LOG.warning("PVOutput post failed: %s", err)
         align_and_sleep(PVOUTPUT_INTERVAL_SECONDS)
 
