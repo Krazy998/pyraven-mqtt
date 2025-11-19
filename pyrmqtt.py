@@ -15,12 +15,21 @@ from typing import Any, Dict, List
 from xml.etree import ElementTree as ET
 
 import paho.mqtt.client as mqtt  # pip install paho-mqtt
-from paho.mqtt.client import WebsocketConnectionError
 import raven  # pip install pyraven
 import serial
 
 DEFAULT_BACKOFF_MAX = 60
 DEFAULT_KEEPALIVE = 30
+
+MQTT_SOCKET_ERRORS: tuple[type[BaseException], ...]
+if hasattr(mqtt, "WebsocketConnectionError"):
+    MQTT_SOCKET_ERRORS = (OSError, mqtt.WebsocketConnectionError)
+else:
+    MQTT_SOCKET_ERRORS = (OSError,)
+
+MQTT_CONNECT_ERRORS: tuple[type[BaseException], ...] = MQTT_SOCKET_ERRORS + (
+    ValueError,
+)
 
 
 class ResilientRaven(raven.raven.Raven):
@@ -158,12 +167,7 @@ def connect_with_backoff(
         try:
             client.connect(host, port, keepalive=DEFAULT_KEEPALIVE)
             return
-        except (
-            OSError,
-            WebsocketConnectionError,
-            mqtt.MQTTException,
-            ValueError,
-        ) as err:
+        except MQTT_CONNECT_ERRORS as err:
             log.warning("MQTT connect error=%r backoff=%.1fs", err, backoff)
         time.sleep(backoff + random.random())
         backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
@@ -195,7 +199,7 @@ def publish_with_reconnect(
             retry = client.publish(topic, payload, qos=qos, retain=retain)
             if retry.rc == mqtt.MQTT_ERR_SUCCESS:
                 return
-        except (OSError, WebsocketConnectionError, mqtt.MQTTException) as err:
+        except MQTT_SOCKET_ERRORS as err:
             log.warning("Reconnect error=%r backoff=%.1fs", err, backoff)
         time.sleep(backoff + random.random())
         backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
@@ -287,7 +291,7 @@ def shutdown_client(client: mqtt.Client, topics: Dict[str, str], log: logging.Lo
     """Publish offline, stop the loop, and disconnect."""
     try:
         client.publish(topics["state"], "offline", qos=1, retain=True)
-    except (OSError, MQTTException):
+    except OSError:
         log.debug("Failed to publish offline state during shutdown", exc_info=True)
     client.loop_stop()
     client.disconnect()
