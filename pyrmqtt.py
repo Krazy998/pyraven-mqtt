@@ -15,18 +15,30 @@ from typing import Any, Dict, List
 from xml.etree import ElementTree as ET
 
 import paho.mqtt.client as mqtt  # pip install paho-mqtt
-from paho.mqtt.client import MQTTException, WebsocketConnectionError
 import raven  # pip install pyraven
 import serial
 
 DEFAULT_BACKOFF_MAX = 60
 DEFAULT_KEEPALIVE = 30
 
-MQTT_SOCKET_ERRORS: tuple[type[BaseException], ...]
 if hasattr(mqtt, "WebsocketConnectionError"):
-    MQTT_SOCKET_ERRORS = (OSError, mqtt.WebsocketConnectionError)
+    WebsocketConnectionError = mqtt.WebsocketConnectionError
 else:
-    MQTT_SOCKET_ERRORS = (OSError,)
+    # Older/newer paho builds or stub files may omit WebsocketConnectionError.
+    class WebsocketConnectionError(OSError):
+        """Fallback type so pylint and runtime error handling agree."""
+
+        pass
+
+if hasattr(mqtt, "MQTTException"):
+    MQTTException = mqtt.MQTTException
+else:
+    class MQTTException(Exception):
+        """Fallback type so pylint sees the attribute we catch at runtime."""
+
+        pass
+
+MQTT_SOCKET_ERRORS: tuple[type[BaseException], ...] = (OSError, WebsocketConnectionError)
 
 MQTT_CONNECT_ERRORS: tuple[type[BaseException], ...] = MQTT_SOCKET_ERRORS + (
     ValueError,
@@ -297,7 +309,7 @@ def shutdown_client(client: mqtt.Client, topics: Dict[str, str], log: logging.Lo
     """Publish offline, stop the loop, and disconnect."""
     try:
         client.publish(topics["state"], "offline", qos=1, retain=True)
-    except OSError:
+    except (OSError, MQTTException):
         log.debug("Failed to publish offline state during shutdown", exc_info=True)
     client.loop_stop()
     client.disconnect()
