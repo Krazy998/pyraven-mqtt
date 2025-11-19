@@ -14,10 +14,14 @@ import threading
 import time
 from datetime import datetime
 from typing import Optional
-from urllib import error as urlerror, parse as urlparse, request as urlrequest
+from urllib import error as urlerror
+from urllib import parse as urlparse
+from urllib import request as urlrequest
 from zoneinfo import ZoneInfo
-
 import paho.mqtt.client as mqtt
+from urllib import error as urlerror
+from urllib import parse as urlparse
+from urllib import request as urlrequest
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")

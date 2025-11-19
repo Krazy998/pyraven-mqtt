@@ -36,17 +36,14 @@ DEFAULT_BACKOFF_MAX = 60
 DEFAULT_KEEPALIVE = 30
 
 
-class FragmentDroppingRaven(raven.raven.Raven):
+class ResilientRaven(raven.raven.Raven):
     """RAVEn subclass that drops malformed XML fragments instead of dying."""
-
-    fragment: str
-    in_fragment: bool
 
     def __init__(self, port: str, log: logging.Logger) -> None:
         self._log = log
         super().__init__(port=port)
-        self.fragment = ""
-        self.in_fragment = False
+        self.fragment = getattr(self, "fragment", "")
+        self.in_fragment = getattr(self, "in_fragment", False)
 
     def handle_fragment(self) -> None:  # type: ignore[override]
         try:
@@ -59,12 +56,8 @@ class FragmentDroppingRaven(raven.raven.Raven):
             )
             self.fragment = ""
             self.in_fragment = False
-        except (UnicodeDecodeError, ValueError) as err:
-            fragment = getattr(self, "fragment", "") or ""
-            frag_len = len(fragment)
-            self._log.warning(
-                "Invalid RAVEn fragment dropped len=%s err=%s", frag_len, err
-            )
+        except Exception:  # pylint: disable=broad-except
+            self._log.exception("Unexpected RAVEn fragment handling failure")
             self.fragment = ""
             self.in_fragment = False
 
@@ -169,8 +162,8 @@ def connect_with_backoff(
             return
         except (OSError, mqtt.WebsocketConnectionError) as err:
             log.warning("MQTT connect error=%r backoff=%.1fs", err, backoff)
-        except Exception as err:  # pylint: disable=broad-except
-            log.exception("Unexpected MQTT connect failure: %s", err)
+        except Exception:
+            log.exception("Unexpected MQTT connect failure")
         time.sleep(backoff + random.random())
         backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
 
@@ -205,14 +198,59 @@ def publish_with_reconnect(
             log.warning("Reconnect error=%r backoff=%.1fs", err, backoff)
             time.sleep(backoff + random.random())
             backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
-        except Exception as err:  # pylint: disable=broad-except
-            log.exception("Unexpected reconnect failure: %s", err)
+        except Exception:
+            log.exception("Unexpected reconnect failure")
             time.sleep(backoff + random.random())
             backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
 
 
-def install_signal_handlers(stopping_flag: list[bool]) -> None:
-    """Install SIGINT/SIGTERM handlers that flip the shared stop flag."""
+def _now_ts() -> float:
+    """Epoch seconds as float."""
+    return time.time()
+
+
+def main() -> None:
+    """Entry point: wire up device, MQTT, and transfer loop."""
+    args = parse_args()
+    setup_logging(args.log_level)
+    log = logging.getLogger("pyrmqtt")
+    topics = build_topics(args.topic)
+
+    class ResilientRaven(raven.raven.Raven):
+        """RAVEn subclass that drops malformed XML fragments instead of dying."""
+
+        def __init__(self, port: str) -> None:
+            self._log = log
+            super().__init__(port=port)
+
+        def handle_fragment(self) -> None:  # type: ignore[override]
+            try:
+                super().handle_fragment()
+            except ET.ParseError as err:
+                fragment = getattr(self, "fragment", "") or ""
+                frag_len = len(fragment)
+                self._log.warning(
+                    "Malformed RAVEn fragment dropped len=%s err=%s", frag_len, err
+                )
+                self.fragment = ""
+                self.in_fragment = False
+            except Exception:
+                self._log.exception("Unexpected RAVEn fragment handling failure")
+                self.fragment = ""
+                self.in_fragment = False
+
+    # Connect to RAVEn
+    try:
+        raven_usb = ResilientRaven(args.device)
+        log.info("Connected to RAVEn device=%s", args.device)
+    except Exception:  # pylint: disable=broad-except
+        log.exception("Failed to connect to RAVEn device=%s", args.device)
+        sys.exit(2)
+
+    client = make_client(args, topics)
+
+    # Stop flag in a list so closures can mutate it
+    stopping = [False]
 
     def _stop_handler(*_args: Any) -> None:
         stopping_flag[0] = True
@@ -255,11 +293,11 @@ def install_mqtt_callbacks(
     client.on_disconnect = on_disconnect
 
 
-def connect_raven_device(device: str, log: logging.Logger) -> FragmentDroppingRaven:
-    """Create the FragmentDroppingRaven wrapper and log failures uniformly."""
+def connect_raven_device(device: str, log: logging.Logger) -> ResilientRaven:
+    """Create the ResilientRaven wrapper and log failures uniformly."""
 
     try:
-        raven_usb = FragmentDroppingRaven(device, log)
+        raven_usb = ResilientRaven(device, log)
     except (OSError, serial.SerialException) as err:
         log.exception("Failed to connect to RAVEn device=%s", device)
         raise RuntimeError("RAVEn connection failed") from err
@@ -268,7 +306,7 @@ def connect_raven_device(device: str, log: logging.Logger) -> FragmentDroppingRa
 
 
 def transfer_loop(
-    raven_usb: FragmentDroppingRaven,
+    raven_usb: ResilientRaven,
     client: mqtt.Client,
     args: argparse.Namespace,
     topics: Dict[str, str],
@@ -310,7 +348,7 @@ def shutdown_client(client: mqtt.Client, topics: Dict[str, str], log: logging.Lo
 
     try:
         client.publish(topics["state"], "offline", qos=1, retain=True)
-    except Exception:  # pylint: disable=broad-except
+    except (OSError, mqtt.MQTTException):
         log.debug("Failed to publish offline state during shutdown", exc_info=True)
     client.loop_stop()
     client.disconnect()
