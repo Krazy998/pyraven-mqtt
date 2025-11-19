@@ -36,6 +36,8 @@ FROM base AS runtime
 
 # Ensure all testing has been run when using BuildKit
 COPY --from=pylint /app/*.py /app/
+COPY entry.sh /app/entry.sh
+RUN chmod +x /app/entry.sh
 WORKDIR /app
 
-ENTRYPOINT ["python", "pyrmqtt.py"]
+ENTRYPOINT ["/app/entry.sh"]
