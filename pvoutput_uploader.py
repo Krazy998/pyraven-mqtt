@@ -156,10 +156,12 @@ def _request(
 
 
 def http_get(url: str, *, params=None, auth=None, timeout=None) -> HttpResponse:
+    """Perform a simple HTTP GET request using urllib primitives."""
     return _request("GET", url, params=params, auth=auth, timeout=timeout)
 
 
 def http_post(url: str, *, data=None, headers=None, timeout=None) -> HttpResponse:
+    """Perform an HTTP POST request with form data and optional headers."""
     return _request("POST", url, data=data, headers=headers, timeout=timeout)
 
 
