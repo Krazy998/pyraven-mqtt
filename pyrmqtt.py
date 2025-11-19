@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
-"""
-Transfers data from a Rainforest Automation RAVEn USB stick to MQTT.
-
-Topic layout (given --topic <prefix>):
-  <prefix>/state              - birth/LWT messages ("online"/"offline"), retained
-  <prefix>/sensor/telemetry   - telemetry payloads with an added "ts" field
-  <prefix>/status             - reserved for heartbeat/status (not used yet)
-
-Reliability:
-- MQTT network loop thread
-- Exponential backoff + jitter on connect/reconnect
-- LWT + birth messages
-- Graceful shutdown on SIGINT/SIGTERM
-- Optional TLS
-"""
+"""Transfer Rainforest Automation RAVEn telemetry to MQTT reliably."""
 
 from __future__ import annotations
 
@@ -25,10 +11,11 @@ import random
 import signal
 import sys
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List
 from xml.etree import ElementTree as ET
 
 import paho.mqtt.client as mqtt  # pip install paho-mqtt
+from paho.mqtt.client import MQTTException, WebsocketConnectionError
 import raven  # pip install pyraven
 import serial
 
@@ -41,9 +28,9 @@ class ResilientRaven(raven.raven.Raven):
 
     def __init__(self, port: str, log: logging.Logger) -> None:
         self._log = log
+        self.fragment: str = ""
+        self.in_fragment: bool = False
         super().__init__(port=port)
-        self.fragment = getattr(self, "fragment", "")
-        self.in_fragment = getattr(self, "in_fragment", False)
 
     def handle_fragment(self) -> None:  # type: ignore[override]
         try:
@@ -145,13 +132,24 @@ def make_client(args: argparse.Namespace, topics: Dict[str, str]) -> mqtt.Client
         if args.insecure:
             client.tls_insecure_set(True)
 
-    # Last Will: publish "offline" on state topic if we disappear
     client.will_set(topics["state"], payload="offline", qos=1, retain=True)
     return client
 
 
+def install_signal_handlers(stopping_flag: List[bool]) -> None:
+    """Install SIGINT/SIGTERM handlers that flip the shared stop flag."""
+    log = logging.getLogger("pyrmqtt")
+
+    def _handler(signum: int, _frame: Any) -> None:
+        log.info("Signal %s received; stopping", signum)
+        stopping_flag[0] = True
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
+
+
 def connect_with_backoff(
-    client: mqtt.Client, host: str, port: int, stopping_flag: list[bool]
+    client: mqtt.Client, host: str, port: int, stopping_flag: List[bool]
 ) -> None:
     """Connect to MQTT with exponential backoff + jitter, honoring stop requests."""
     log = logging.getLogger("pyrmqtt")
@@ -160,10 +158,8 @@ def connect_with_backoff(
         try:
             client.connect(host, port, keepalive=DEFAULT_KEEPALIVE)
             return
-        except (OSError, mqtt.WebsocketConnectionError) as err:
+        except (OSError, WebsocketConnectionError, MQTTException, ValueError) as err:
             log.warning("MQTT connect error=%r backoff=%.1fs", err, backoff)
-        except Exception:
-            log.exception("Unexpected MQTT connect failure")
         time.sleep(backoff + random.random())
         backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
 
@@ -174,7 +170,7 @@ def publish_with_reconnect(
     payload: str,
     qos: int,
     retain: bool,
-    stopping_flag: list[bool],
+    stopping_flag: List[bool],
     birth_topic: str | None = None,
 ) -> None:
     """Publish once; on failure, attempt to reconnect with backoff and re-send birth."""
@@ -194,69 +190,10 @@ def publish_with_reconnect(
             retry = client.publish(topic, payload, qos=qos, retain=retain)
             if retry.rc == mqtt.MQTT_ERR_SUCCESS:
                 return
-        except (OSError, mqtt.WebsocketConnectionError) as err:
+        except (OSError, WebsocketConnectionError, MQTTException) as err:
             log.warning("Reconnect error=%r backoff=%.1fs", err, backoff)
-            time.sleep(backoff + random.random())
-            backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
-        except Exception:
-            log.exception("Unexpected reconnect failure")
-            time.sleep(backoff + random.random())
-            backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
-
-
-def _now_ts() -> float:
-    """Epoch seconds as float."""
-    return time.time()
-
-
-def main() -> None:
-    """Entry point: wire up device, MQTT, and transfer loop."""
-    args = parse_args()
-    setup_logging(args.log_level)
-    log = logging.getLogger("pyrmqtt")
-    topics = build_topics(args.topic)
-
-    class ResilientRaven(raven.raven.Raven):
-        """RAVEn subclass that drops malformed XML fragments instead of dying."""
-
-        def __init__(self, port: str) -> None:
-            self._log = log
-            super().__init__(port=port)
-
-        def handle_fragment(self) -> None:  # type: ignore[override]
-            try:
-                super().handle_fragment()
-            except ET.ParseError as err:
-                fragment = getattr(self, "fragment", "") or ""
-                frag_len = len(fragment)
-                self._log.warning(
-                    "Malformed RAVEn fragment dropped len=%s err=%s", frag_len, err
-                )
-                self.fragment = ""
-                self.in_fragment = False
-            except Exception:
-                self._log.exception("Unexpected RAVEn fragment handling failure")
-                self.fragment = ""
-                self.in_fragment = False
-
-    # Connect to RAVEn
-    try:
-        raven_usb = ResilientRaven(args.device)
-        log.info("Connected to RAVEn device=%s", args.device)
-    except Exception:  # pylint: disable=broad-except
-        log.exception("Failed to connect to RAVEn device=%s", args.device)
-        sys.exit(2)
-
-    client = make_client(args, topics)
-
-    # Stop flag in a list so closures can mutate it
-    stopping = [False]
-
-    def _stop_handler(*_args: Any) -> None:
-        stopping_flag[0] = True
-
-    signal.signal(signal.SIGINT, _stop_handler)
-    signal.signal(signal.SIGTERM, _stop_handler)
+        time.sleep(backoff + random.random())
+        backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
 
 
 def install_mqtt_callbacks(
@@ -295,7 +232,6 @@ def install_mqtt_callbacks(
 
 def connect_raven_device(device: str, log: logging.Logger) -> ResilientRaven:
     """Create the ResilientRaven wrapper and log failures uniformly."""
-
     try:
         raven_usb = ResilientRaven(device, log)
     except (OSError, serial.SerialException) as err:
@@ -310,11 +246,10 @@ def transfer_loop(
     client: mqtt.Client,
     args: argparse.Namespace,
     topics: Dict[str, str],
-    stopping_flag: list[bool],
+    stopping_flag: List[bool],
     log: logging.Logger,
 ) -> None:
     """Poll the RAVEn stick and publish telemetry until asked to stop."""
-
     while not stopping_flag[0]:
         try:
             raw = raven_usb.long_poll_result()
@@ -345,10 +280,9 @@ def transfer_loop(
 
 def shutdown_client(client: mqtt.Client, topics: Dict[str, str], log: logging.Logger) -> None:
     """Publish offline, stop the loop, and disconnect."""
-
     try:
         client.publish(topics["state"], "offline", qos=1, retain=True)
-    except (OSError, mqtt.MQTTException):
+    except (OSError, MQTTException):
         log.debug("Failed to publish offline state during shutdown", exc_info=True)
     client.loop_stop()
     client.disconnect()
