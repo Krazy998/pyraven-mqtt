@@ -100,14 +100,17 @@ class HttpResponse:
 
     @property
     def text(self) -> str:
+        """Return the body as text, caching the decoded value."""
         if self._text_cache is None:
             self._text_cache = self._content.decode("utf-8", errors="replace")
         return self._text_cache
 
     def json(self) -> dict:
+        """Parse the response body as JSON and return the result."""
         return json.loads(self.text)
 
     def raise_for_status(self) -> None:
+        """Raise RequestException if the response code indicates an error."""
         if self.status_code >= 400:
             raise RequestException(f"HTTP {self.status_code}: {self.text}")
 
