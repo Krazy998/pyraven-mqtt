@@ -128,7 +128,6 @@ def _request(
     auth: Optional[tuple[str, str]] = None,
     timeout: Optional[float] = None,
 ) -> HttpResponse:
-    """Perform an HTTP request using urllib and return an HttpResponse."""
     query = parse.urlencode(params or {})
     full_url = f"{url}?{query}" if query else url
 
@@ -157,12 +156,10 @@ def _request(
 
 
 def http_get(url: str, *, params=None, auth=None, timeout=None) -> HttpResponse:
-    """Issue a GET request with optional query params and auth."""
     return _request("GET", url, params=params, auth=auth, timeout=timeout)
 
 
 def http_post(url: str, *, data=None, headers=None, timeout=None) -> HttpResponse:
-    """Issue a POST request with optional body, headers, and timeout."""
     return _request("POST", url, data=data, headers=headers, timeout=timeout)
 
 
