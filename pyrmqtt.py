@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 from xml.etree import ElementTree as ET
 
 import paho.mqtt.client as mqtt  # pip install paho-mqtt
-from paho.mqtt.client import WebsocketConnectionError
+from paho.mqtt.client import MQTTException, WebsocketConnectionError
 import raven  # pip install pyraven
 import serial
 
@@ -161,7 +161,7 @@ def connect_with_backoff(
         except (
             OSError,
             WebsocketConnectionError,
-            mqtt.MQTTException,
+            MQTTException,
             ValueError,
         ) as err:
             log.warning("MQTT connect error=%r backoff=%.1fs", err, backoff)
@@ -195,7 +195,7 @@ def publish_with_reconnect(
             retry = client.publish(topic, payload, qos=qos, retain=retain)
             if retry.rc == mqtt.MQTT_ERR_SUCCESS:
                 return
-        except (OSError, WebsocketConnectionError, mqtt.MQTTException) as err:
+        except (OSError, WebsocketConnectionError, MQTTException) as err:
             log.warning("Reconnect error=%r backoff=%.1fs", err, backoff)
         time.sleep(backoff + random.random())
         backoff = min(backoff * 2, float(DEFAULT_BACKOFF_MAX))
