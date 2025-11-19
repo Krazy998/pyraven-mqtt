@@ -22,6 +22,16 @@ import serial
 DEFAULT_BACKOFF_MAX = 60
 DEFAULT_KEEPALIVE = 30
 
+MQTT_SOCKET_ERRORS: tuple[type[BaseException], ...]
+if hasattr(mqtt, "WebsocketConnectionError"):
+    MQTT_SOCKET_ERRORS = (OSError, mqtt.WebsocketConnectionError)
+else:
+    MQTT_SOCKET_ERRORS = (OSError,)
+
+MQTT_CONNECT_ERRORS: tuple[type[BaseException], ...] = MQTT_SOCKET_ERRORS + (
+    ValueError,
+)
+
 
 class ResilientRaven(raven.raven.Raven):
     """RAVEn subclass that drops malformed XML fragments instead of dying."""
