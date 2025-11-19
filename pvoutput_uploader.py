@@ -6,17 +6,19 @@ Fronius inverter, and posts status to PVOutput at a fixed interval.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
+import socket
 import threading
 import time
 from datetime import datetime
 from typing import Optional
+from urllib import error as urlerror
+from urllib import parse, request as urlrequest
 
 from zoneinfo import ZoneInfo
-import requests
-from requests import RequestException
 import paho.mqtt.client as mqtt
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -83,6 +85,87 @@ class Latest:
 LATEST = Latest()
 
 
+class RequestException(Exception):
+    """Raised when an HTTP request fails."""
+
+
+class HttpResponse:
+    """Minimal HTTP response wrapper mimicking requests.Response."""
+
+    def __init__(self, status_code: int, content: bytes, headers: dict[str, str]):
+        self.status_code = status_code
+        self._content = content
+        self.headers = headers
+        self._text_cache: Optional[str] = None
+
+    @property
+    def text(self) -> str:
+        if self._text_cache is None:
+            self._text_cache = self._content.decode("utf-8", errors="replace")
+        return self._text_cache
+
+    def json(self) -> dict:
+        return json.loads(self.text)
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RequestException(f"HTTP {self.status_code}: {self.text}")
+
+
+def _encode_basic_auth(auth: tuple[str, str]) -> str:
+    user, password = auth
+    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
+
+
+def _request(
+    method: str,
+    url: str,
+    *,
+    params: Optional[dict] = None,
+    data: Optional[dict] = None,
+    headers: Optional[dict] = None,
+    auth: Optional[tuple[str, str]] = None,
+    timeout: Optional[float] = None,
+) -> HttpResponse:
+    """Perform an HTTP request using urllib and return an HttpResponse."""
+    query = parse.urlencode(params or {})
+    full_url = f"{url}?{query}" if query else url
+
+    req_headers = dict(headers or {})
+    if auth:
+        req_headers.setdefault("Authorization", _encode_basic_auth(auth))
+
+    payload = None
+    if data is not None:
+        payload = parse.urlencode(data).encode("utf-8")
+        req_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+
+    req = urlrequest.Request(full_url, data=payload, headers=req_headers, method=method.upper())
+    try:
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            content = resp.read()
+            status = resp.getcode()
+            resp_headers = dict(resp.getheaders())
+    except urlerror.HTTPError as err:
+        content = err.read()
+        status = err.code
+        resp_headers = dict(err.headers.items()) if err.headers else {}
+    except (urlerror.URLError, socket.timeout, OSError) as err:
+        raise RequestException(str(err)) from err
+    return HttpResponse(status, content, resp_headers)
+
+
+def http_get(url: str, *, params=None, auth=None, timeout=None) -> HttpResponse:
+    """Issue a GET request with optional query params and auth."""
+    return _request("GET", url, params=params, auth=auth, timeout=timeout)
+
+
+def http_post(url: str, *, data=None, headers=None, timeout=None) -> HttpResponse:
+    """Issue a POST request with optional body, headers, and timeout."""
+    return _request("POST", url, data=data, headers=headers, timeout=timeout)
+
+
 def on_connect(client: mqtt.Client, _userdata, _flags, result_code: int) -> None:
     """MQTT connect callback."""
     if result_code == 0:
@@ -121,7 +204,7 @@ def get_voltage() -> Optional[float]:
     params = {"Scope": "Device", "DeviceId": FRONIUS_DEVICE_ID, "DataCollection": "CommonInverterData"}
     try:
         auth = (FRONIUS_USER, FRONIUS_PASS) if FRONIUS_USER and FRONIUS_PASS else None
-        resp = requests.get(url, params=params, auth=auth, timeout=FRONIUS_TIMEOUT)
+        resp = http_get(url, params=params, auth=auth, timeout=FRONIUS_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
         return float(data["Body"]["Data"]["UAC"]["Value"])
@@ -166,7 +249,7 @@ def post_pvoutput(now_local: datetime, demand_w: Optional[float], voltage_v: Opt
         "X-Rate-Limit": "1",
     }
 
-    resp = requests.post(PVOUTPUT_URL, data=payload, headers=headers, timeout=8)
+    resp = http_post(PVOUTPUT_URL, data=payload, headers=headers, timeout=8)
     if resp.status_code != 200:
         raise RuntimeError(f"PVOutput HTTP {resp.status_code} {resp.text}")
     LOG.debug("PVOutput: %s | remaining=%s", resp.text.strip(), resp.headers.get("X-Rate-Limit-Remaining"))
