@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS base
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -31,13 +31,19 @@ RUN pylint --rcfile=.pylintrc pyrmqtt.py pvoutput_uploader.py \
 
 FROM base AS runtime
 
+RUN getent group dialout >/dev/null || groupadd --system dialout \
+    && useradd --system --uid 10001 --gid dialout --no-create-home --shell /usr/sbin/nologin appuser
+
 # Ensure lint & tests run when building with BuildKit
-COPY --from=test /app/pyrmqtt.py /app/pvoutput_uploader.py /app/
-COPY entry.sh /app/entry.sh
-RUN chmod +x /app/entry.sh
+COPY --from=test --chown=root:root /app/pyrmqtt.py /app/pvoutput_uploader.py /app/
+COPY --chown=root:root entry.sh /app/entry.sh
+RUN chmod 0644 /app/pyrmqtt.py /app/pvoutput_uploader.py \
+    && chmod 0755 /app/entry.sh
 
 LABEL org.opencontainers.image.source="https://github.com/Krazy998/pyraven-mqtt" \
       org.opencontainers.image.description="Rainforest RAVEn USB to MQTT bridge with optional PVOutput uploader" \
       org.opencontainers.image.licenses="Unlicense"
+
+USER appuser
 
 ENTRYPOINT ["/app/entry.sh"]

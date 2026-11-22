@@ -119,6 +119,26 @@ class TestPVOutputUploader(unittest.TestCase):
         client = pv.make_mqtt_client(cfg, pv.Latest())
         self.assertIsNotNone(client)
 
+    def test_no_redirect_handler_blocks_redirects(self) -> None:
+        handler = pv._NoRedirectHandler()  # pylint: disable=protected-access
+        self.assertIsNone(handler.redirect_request(None, None, 302, "Found", {}, "https://evil.example"))
+
+    def test_request_caps_response_read_size(self) -> None:
+        fake_resp = mock.MagicMock()
+        fake_resp.__enter__.return_value = fake_resp
+        fake_resp.read.return_value = b"OK 200"
+        fake_resp.getcode.return_value = 200
+        fake_resp.getheaders.return_value = [("Content-Type", "text/plain")]
+
+        fake_opener = mock.MagicMock()
+        fake_opener.open.return_value = fake_resp
+
+        with mock.patch.object(pv.urlrequest, "build_opener", return_value=fake_opener):
+            resp = pv.http_get("https://example.invalid/test", timeout=2.0)
+
+        fake_resp.read.assert_called_once_with(pv.MAX_RESPONSE_BYTES)
+        self.assertEqual(resp.status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()

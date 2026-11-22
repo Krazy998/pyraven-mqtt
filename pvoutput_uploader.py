@@ -30,6 +30,7 @@ LOG = logging.getLogger("pvoutput")
 PVOUTPUT_URL = "https://pvoutput.org/service/r2/addstatus.jsp"
 DEFAULT_BACKOFF_MAX = 60
 DEFAULT_KEEPALIVE = 60
+MAX_RESPONSE_BYTES = 1_048_576
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -193,6 +194,16 @@ class HttpResponse:
             raise RequestException(f"HTTP {self.status_code}: {self.text}")
 
 
+class _NoRedirectHandler(urlrequest.HTTPRedirectHandler):
+    """Disable HTTP redirects so API-key and Basic Auth headers cannot leak cross-host."""
+
+    def redirect_request(  # pylint: disable=too-many-arguments,too-many-positional-arguments,unused-argument
+        self, req, fp, code, msg, headers, newurl
+    ):
+        """Return None to refuse all HTTP redirects."""
+        return None
+
+
 def _encode_basic_auth(auth: tuple[str, str]) -> str:
     """Encode a username/password pair into an HTTP Basic Authorization header."""
     user, password = auth
@@ -209,6 +220,7 @@ def _request(
     headers: Optional[dict[str, str]] = None,
     auth: Optional[tuple[str, str]] = None,
     timeout: Optional[float] = None,
+    allow_redirects: bool = False,
 ) -> HttpResponse:
     """Execute an HTTP request using urllib and return an HttpResponse."""
     query = parse.urlencode(params or {})
@@ -224,14 +236,15 @@ def _request(
         req_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
 
     req = urlrequest.Request(full_url, data=payload, headers=req_headers, method=method.upper())
+    opener = urlrequest.build_opener() if allow_redirects else urlrequest.build_opener(_NoRedirectHandler)
     try:
-        with urlrequest.urlopen(req, timeout=timeout) as resp:
-            content = resp.read()
+        with opener.open(req, timeout=timeout) as resp:
+            content = resp.read(MAX_RESPONSE_BYTES)
             status = resp.getcode()
             resp_headers = dict(resp.getheaders())
     except urlerror.HTTPError as err:
         try:
-            content = err.read()
+            content = err.read(MAX_RESPONSE_BYTES)
             status = err.code
             resp_headers = dict(err.headers.items()) if err.headers else {}
         finally:

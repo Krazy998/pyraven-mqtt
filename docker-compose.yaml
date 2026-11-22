@@ -5,6 +5,17 @@ services:
     # build: .
     container_name: pyrmqtt
     restart: always
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Match the host serial device's group (typically `dialout` / GID 20 on Debian/Ubuntu/RPi OS;
+    # run `stat -c '%g' /dev/serial/by-id/...` if your distro uses a different GID such as `uucp`)
+    group_add:
+      - dialout
     devices:
       # Map your RAVEn USB stick by stable /dev/serial/by-id path
       - /dev/serial/by-id/usb-Rainforest_RFA-Z106-RA-PC_RAVEn_v2.3.21-if00-port0:/serial

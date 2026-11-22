@@ -42,6 +42,15 @@ services:
     image: ghcr.io/krazy998/pyraven-mqtt:latest
     container_name: pyrmqtt
     restart: always
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    group_add:
+      - dialout
 
     # Map the RAVEn device into the container
     devices:
@@ -243,7 +252,7 @@ docker build -t pyraven-mqtt:local .
 
 The Dockerfile is multi-stage (`base` ➜ `test` [pylint + pytest] ➜ `runtime`).
 
-### Automated releases (GHCR)
+### Automated releases & security patching (GHCR)
 
 Publishing a GitHub Release (e.g., tag `v2.0.0`) triggers [`.github/workflows/docker-release.yml`](.github/workflows/docker-release.yml), which builds and pushes multi-arch (`linux/amd64`, `linux/arm64`) images to:
 
@@ -255,6 +264,11 @@ ghcr.io/krazy998/pyraven-mqtt:latest
 ```
 
 Pre-releases are tagged with their version tag only and do not overwrite `:latest`.
+
+- **Automated Dependabot patching**: [`.github/dependabot.yml`](.github/dependabot.yml) checks daily for updates to the pinned `python:3.12-slim` base image digest and Python dependencies (and weekly for GitHub Actions).
+- Every PR runs `pylint`, `pytest`, a Docker build, and a **Trivy** container vulnerability scan (failing on fixable `HIGH`/`CRITICAL` CVEs).
+- When a non-major Dependabot PR passes CI, [`.github/workflows/dependabot-auto-deploy.yml`](.github/workflows/dependabot-auto-deploy.yml) automatically squash-merges it and—if `Dockerfile` or `requirements.txt` changed—cuts a new patch release (e.g., `v2.0.1`) and pushes updated multi-arch images to GHCR with no manual intervention. Major version bumps remain open for manual review.
+- **Container hardening**: The runtime container runs as unprivileged user `appuser` (UID `10001`, group `dialout`) and supports `read_only: true` and `cap_drop: [ALL]`. If your host serial device belongs to a group other than `dialout` (GID `20`), run `stat -c '%g' /dev/serial/by-id/...` and set that numeric GID in `group_add`.
 
 ---
 

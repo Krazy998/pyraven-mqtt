@@ -1,0 +1,118 @@
+name: Dependabot Auto-Merge & Patch Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: write
+
+jobs:
+  auto-merge-and-release:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]'
+    outputs:
+      deploy: ${{ steps.merge.outputs.deploy }}
+      release_tag: ${{ steps.merge.outputs.release_tag }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate, merge Dependabot PR, and cut patch release if runtime changed
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          echo "deploy=false" >> "$GITHUB_OUTPUT"
+          echo "release_tag=" >> "$GITHUB_OUTPUT"
+
+          # Find the open Dependabot PR matching the exact SHA verified by CI
+          PR_JSON="$(gh api "repos/${REPO}/pulls?state=open&base=main&per_page=50" \
+            --jq "[.[] | select(.head.sha == \"${HEAD_SHA}\" and .user.login == \"dependabot[bot]\" and .head.repo.full_name == \"${REPO}\")][0] // empty")"
+
+          if [ -z "$PR_JSON" ]; then
+            echo "No matching open Dependabot PR found for SHA ${HEAD_SHA}; skipping."
+            exit 0
+          fi
+
+          PR_NUMBER="$(printf '%s' "$PR_JSON" | jq -r '.number')"
+          PR_TITLE="$(printf '%s' "$PR_JSON" | jq -r '.title')"
+          echo "Evaluating Dependabot PR #${PR_NUMBER}: ${PR_TITLE}"
+
+          # Only allow updates to dependency/workflow files
+          CHANGED_FILES="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename')"
+          RUNTIME_CHANGED=false
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            case "$file" in
+              Dockerfile|requirements.txt)
+                RUNTIME_CHANGED=true
+                ;;
+              requirements-dev.txt|.github/workflows/*)
+                ;;
+              *)
+                echo "PR touches unexpected file '${file}'; leaving open for manual review."
+                exit 0
+                ;;
+            esac
+          done <<< "$CHANGED_FILES"
+
+          # Skip automatic merge for major semver bumps (e.g. "from 2.x to 3.x") so breaking changes get manual review
+          if printf '%s' "$PR_TITLE" | grep -Eq 'from v?([0-9]+)\.[0-9]+.* to v?([0-9]+)\.[0-9]+'; then
+            FROM_MAJOR="$(printf '%s' "$PR_TITLE" | sed -E 's/.*from v?([0-9]+)\..*/\1/')"
+            TO_MAJOR="$(printf '%s' "$PR_TITLE" | sed -E 's/.*to v?([0-9]+)\..*/\1/')"
+            if [ "$FROM_MAJOR" != "$TO_MAJOR" ]; then
+              echo "Major version bump (${FROM_MAJOR} -> ${TO_MAJOR}); leaving open for manual review."
+              exit 0
+            fi
+          fi
+
+          # Atomically squash-merge the exact CI-verified commit
+          gh pr merge "$PR_NUMBER" --squash --match-head-commit "$HEAD_SHA" --delete-branch
+          echo "Merged PR #${PR_NUMBER}."
+
+          if [ "$RUNTIME_CHANGED" != "true" ]; then
+            echo "Only dev/CI dependencies changed; skipping Docker image release."
+            exit 0
+          fi
+
+          # Compute next semver patch tag from latest vX.Y.Z tag
+          git fetch --tags origin main
+          LATEST_TAG="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+          if [ -z "$LATEST_TAG" ]; then
+            NEXT_TAG="v2.0.1"
+          else
+            VER="${LATEST_TAG#v}"
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$VER"
+            NEXT_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+
+          echo "Creating automated patch release ${NEXT_TAG} for PR #${PR_NUMBER}..."
+          gh release create "$NEXT_TAG" \
+            --target main \
+            --title "${NEXT_TAG} (Automated security/dependency update)" \
+            --notes "Automated patch release triggered by Dependabot PR #${PR_NUMBER}: ${PR_TITLE}"
+
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${NEXT_TAG}" >> "$GITHUB_OUTPUT"
+
+  deploy-image:
+    needs: auto-merge-and-release
+    if: needs.auto-merge-and-release.outputs.deploy == 'true'
+    uses: ./.github/workflows/docker-release.yml
+    with:
+      release_tag: ${{ needs.auto-merge-and-release.outputs.release_tag }}
+    secrets: inherit
