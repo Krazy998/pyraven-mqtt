@@ -42,7 +42,14 @@ RUN getent group dialout >/dev/null || groupadd --system dialout \
 COPY --from=test --chown=root:root /app/pyrmqtt.py /app/pvoutput_uploader.py /app/
 COPY --chown=root:root entry.sh /app/entry.sh
 RUN chmod 0644 /app/pyrmqtt.py /app/pvoutput_uploader.py \
-    && chmod 0755 /app/entry.sh
+    && chmod 0755 /app/entry.sh \
+    && (pip uninstall -y setuptools wheel pip || true) \
+    && rm -rf /usr/local/lib/python*/ensurepip \
+              /usr/local/lib/python*/site-packages/setuptools* \
+              /usr/local/lib/python*/site-packages/wheel* \
+              /usr/local/lib/python*/site-packages/pip* \
+              /usr/local/bin/pip* \
+    && python -c "import pyrmqtt, pvoutput_uploader, paho.mqtt.client, raven; from zoneinfo import ZoneInfo; ZoneInfo('Australia/Melbourne')"
 
 LABEL org.opencontainers.image.source="https://github.com/Krazy998/pyraven-mqtt" \
       org.opencontainers.image.description="Rainforest RAVEn USB to MQTT bridge with optional PVOutput uploader" \
