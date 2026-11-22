@@ -56,10 +56,10 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'release' }}
             type=semver,pattern={{major}},enable=${{ github.event_name == 'release' }}
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
-            type=semver,pattern={{version}},value=${{ inputs.release_tag }},enable=${{ github.event_name == 'workflow_call' && inputs.release_tag != '' }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release_tag }},enable=${{ github.event_name == 'workflow_call' && inputs.release_tag != '' }}
-            type=semver,pattern={{major}},value=${{ inputs.release_tag }},enable=${{ github.event_name == 'workflow_call' && inputs.release_tag != '' }}
-            type=raw,value=latest,enable=${{ github.event_name == 'workflow_call' }}
+            type=semver,pattern={{version}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
+            type=semver,pattern={{major}},value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
+            type=raw,value=latest,enable=${{ inputs.release_tag != '' }}
             type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag == '' }}
 
