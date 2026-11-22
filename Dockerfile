@@ -16,16 +16,16 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt \
 
 FROM base AS test
 
-COPY requirements-dev.txt /tmp/requirements-dev.txt
+COPY requirements.txt requirements-dev.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt \
-    && rm -f /tmp/requirements-dev.txt
+    && rm -f /tmp/requirements.txt /tmp/requirements-dev.txt
 
 COPY .pylintrc ./
 COPY pyrmqtt.py pvoutput_uploader.py ./
 COPY tests ./tests
 
 RUN pylint --rcfile=.pylintrc pyrmqtt.py pvoutput_uploader.py \
-    && pytest -v
+    && python -m pytest -v
 
 ##----------------------------------------------------------------------
 
