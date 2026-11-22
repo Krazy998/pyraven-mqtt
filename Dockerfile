@@ -1,43 +1,43 @@
-FROM python:3.9-slim AS base
+FROM python:3.12-slim AS base
 
-ARG PIP_NO_CACHE_DIR=1
-RUN pip install -U pip pipenv
-
-ADD Pipfile* /tmp/
-WORKDIR /tmp
-RUN pipenv install --system --ignore-pipfile
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    RAVEN_DEVICE=/serial
 
 WORKDIR /app
 
-##----------------------------------------------------------------------
-
-FROM base AS testing
-
-WORKDIR /tmp
-RUN pipenv install --system --dev --ignore-pipfile
-
-ADD *.py /app/
-
-RUN chmod a+rw /app
-WORKDIR /app
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt \
+    && rm -f /tmp/requirements.txt
 
 ##----------------------------------------------------------------------
 
-FROM testing AS pylint
+FROM base AS test
 
-ADD .pylintrc /tmp
+COPY requirements-dev.txt /tmp/requirements-dev.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt \
+    && rm -f /tmp/requirements-dev.txt
 
-ARG PYTHONPATH=.
-RUN pylint --rcfile "/tmp/.pylintrc" *.py
+COPY .pylintrc ./
+COPY pyrmqtt.py pvoutput_uploader.py ./
+COPY tests ./tests
+
+RUN pylint --rcfile=.pylintrc pyrmqtt.py pvoutput_uploader.py \
+    && pytest -v
 
 ##----------------------------------------------------------------------
 
 FROM base AS runtime
 
-# Ensure all testing has been run when using BuildKit
-COPY --from=pylint /app/*.py /app/
+# Ensure lint & tests run when building with BuildKit
+COPY --from=test /app/pyrmqtt.py /app/pvoutput_uploader.py /app/
 COPY entry.sh /app/entry.sh
 RUN chmod +x /app/entry.sh
-WORKDIR /app
+
+LABEL org.opencontainers.image.source="https://github.com/Krazy998/pyraven-mqtt" \
+      org.opencontainers.image.description="Rainforest RAVEn USB to MQTT bridge with optional PVOutput uploader" \
+      org.opencontainers.image.licenses="Unlicense"
 
 ENTRYPOINT ["/app/entry.sh"]

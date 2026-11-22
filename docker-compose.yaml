@@ -1,36 +1,38 @@
----
-version: "3.8"
 services:
   pyrmqtt:
-    build: /opt/pyraven-mqtt
-    image: pyrmqtt
+    image: ghcr.io/krazy998/pyraven-mqtt:latest
+    # Uncomment to build locally instead of pulling from GHCR:
+    # build: .
     container_name: pyrmqtt
-    tty: true
     restart: always
     devices:
-      # your existing RAVEn USB mapping
+      # Map your RAVEn USB stick by stable /dev/serial/by-id path
       - /dev/serial/by-id/usb-Rainforest_RFA-Z106-RA-PC_RAVEn_v2.3.21-if00-port0:/serial
     environment:
       RAVEN_DEVICE: "/serial"
-      # --- existing MQTT config used by pyrmqtt.py ---
-      MQTT_HOST: 192.168.0.0
-      MQTT_PORT: 1883
+
+      # --- MQTT config ---
+      MQTT_HOST: "192.168.1.10"
+      MQTT_PORT: "1883"
       MQTT_USERNAME: "yourusername"
       MQTT_PASSWORD: "yourpassword"
+      # MQTT_TOPIC: "raven"
+      # MQTT_TLS: "false"
 
       # --- PVOutput uploader (optional) ---
-      PVOUTPUT_ENABLED: "true"         # set "false" to disable
+      PVOUTPUT_ENABLED: "false"        # set "true" to enable
       PVOUTPUT_API_KEY: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       PVOUTPUT_SYSTEM_ID: "12345"
       PVOUTPUT_NET: "0"                # 0 = gross (v4 only), 1 = net (v2 export + v4 import)
-      PVOUTPUT_INTERVAL_SECONDS: "300" # 300=5min (PVOutput standard interval)
-
-      # --- Telemetry source ---
+      PVOUTPUT_INTERVAL_SECONDS: "300" # 300 = 5 min (PVOutput standard interval)
       PVOUTPUT_MQTT_TOPIC: "raven/sensor/telemetry"
 
       # --- Fronius voltage source (optional) ---
-      FRONIUS_HOST: "192.168.0.0"
+      FRONIUS_HOST: "192.168.1.10"
       FRONIUS_DEVICE_ID: "1"
       # FRONIUS_USERNAME: ""
       # FRONIUS_PASSWORD: ""
-      TZ: "Australia/Melbourne"        # matches your locale; PVOutput uses system tz
+
+      # --- Misc ---
+      TZ: "Australia/Melbourne"        # PVOutput uses local date/time
+      LOG_LEVEL: "INFO"

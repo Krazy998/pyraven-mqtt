@@ -1,28 +1,49 @@
-#!/usr/bin/env sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Start with any args passed via `command:`
-set -- "$@"
-
-# --host
-case " $* " in *" --host "*) : ;; *) [ -n "${MQTT_HOST:-}" ] && set -- --host "$MQTT_HOST" "$@";; esac
-# --port
-case " $* " in *" --port "*) : ;; *) [ -n "${MQTT_PORT:-}" ] && set -- --port "${MQTT_PORT}" "$@";; esac
-# --device (default /serial)
-: "${RAVEN_DEVICE:=/serial}"
-case " $* " in *" --device "*) : ;; *) set -- --device "$RAVEN_DEVICE" "$@";; esac
-# --username / --password (only if non-empty)
-case " $* " in *" --username "*) : ;; *)
-  if [ -n "${MQTT_USERNAME:-}" ]; then set -- --username "$MQTT_USERNAME" "$@"; fi
-esac
-case " $* " in *" --password "*) : ;; *)
-  if [ -n "${MQTT_PASSWORD:-}" ]; then set -- --password "$MQTT_PASSWORD" "$@"; fi
+pvoutput_flag="$(printf '%s' "${PVOUTPUT_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')"
+case "$pvoutput_flag" in
+  1|true|yes|on)
+    pvoutput_enabled=true
+    ;;
+  *)
+    pvoutput_enabled=false
+    ;;
 esac
 
-# Start PVOutput uploader if enabled
-if [ "${PVOUTPUT_ENABLED:-false}" = "true" ]; then
-  python /app/pvoutput_uploader.py &
+if [ "$pvoutput_enabled" = "false" ]; then
+  exec python /app/pyrmqtt.py "$@"
 fi
 
-# Start RAVEn -> MQTT
-exec python /app/pyrmqtt.py "$@"
+python /app/pvoutput_uploader.py &
+PV_PID=$!
+
+python /app/pyrmqtt.py "$@" &
+PYR_PID=$!
+
+shutting_down=false
+
+shutdown() {
+  shutting_down=true
+  kill -TERM "$PYR_PID" "$PV_PID" 2>/dev/null || true
+  wait "$PYR_PID" 2>/dev/null || true
+  wait "$PV_PID" 2>/dev/null || true
+  exit 0
+}
+
+trap shutdown INT TERM
+
+set +e
+wait -n "$PYR_PID" "$PV_PID"
+exit_code=$?
+set -e
+
+if [ "$shutting_down" = "true" ]; then
+  exit 0
+fi
+
+# If either process exits unexpectedly, terminate the other so Docker restarts cleanly.
+kill -TERM "$PYR_PID" "$PV_PID" 2>/dev/null || true
+wait "$PYR_PID" 2>/dev/null || true
+wait "$PV_PID" 2>/dev/null || true
+exit "${exit_code:-1}"
